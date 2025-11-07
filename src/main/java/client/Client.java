@@ -11,7 +11,8 @@ import static java.lang.System.exit;
 
 public class Client {
     public static final int SIZE_FILE_NAME = 4096;
-    public static final int SIZE_FILE_SIZE = 5;
+    public static final int SIZE_HEADER_LENGTH = 2;
+    public static final int SIZE_FILE_SIZE = 6;
     public static final int SIZE_BUFFER = 8192;//определить лучший размер позже
     public static final double MAX_SIZE_FILE = Math.pow(2, 40);
     public static File file;
@@ -58,13 +59,17 @@ public class Client {
     }
 
     public static void setInfoFileClient(BufferedOutputStream out) throws IOException {
-        ByteBuffer buffer = ByteBuffer.allocate(SIZE_FILE_NAME + SIZE_FILE_SIZE);
-        
-        buffer.put(fileName.getBytes());
-        buffer.put("#".getBytes()); 
-        buffer.putLong(fileName.length());
-        buffer.put("#".getBytes());
-        out.write(buffer.array());
+        ByteArrayOutputStream firstByteArray = new ByteArrayOutputStream(SIZE_HEADER_LENGTH);
+        ByteArrayOutputStream secondByteArray = new ByteArrayOutputStream();
+
+        secondByteArray.write(fileName.getBytes());
+        secondByteArray.write("#".getBytes());
+        secondByteArray.write(Long.valueOf(fileName.length()).toString().getBytes());
+        secondByteArray.write("#".getBytes());
+        firstByteArray.write(secondByteArray.size());
+
+        out.write(firstByteArray.toByteArray());
+        out.write(secondByteArray.toByteArray());
     }
 
     public static void sendFile(Socket socket) {

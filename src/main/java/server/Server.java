@@ -4,15 +4,15 @@ package server;
 import java.io.*;
 import java.net.ServerSocket;
 import java.net.Socket;
+import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
 
 import static java.lang.System.exit;
 
 public class Server {
-    public static final int SIZE_FILE_NAME = 4096;
-    public static final int SIZE_FILE_SIZE = 5;
     public static final int SIZE_BUFFER = 8192; //определить лучший размер позже
+    public static final int SIZE_HEADER_LENGTH= 2;
 
 
     public static String fileName;
@@ -51,24 +51,33 @@ public class Server {
     }
 
     public static void getInfoFileClient(BufferedInputStream in) throws IOException {
-        byte[] arrByteFile = new byte[SIZE_FILE_NAME + SIZE_FILE_SIZE];
-        int off = 0;
-        int total = 0;
-        int maxLen = arrByteFile.length;
-        int readingByte;
-        while ((readingByte = in.read(arrByteFile, off, maxLen)) != -1) {
-            if ((total += readingByte) == maxLen) {
-                break;
+        byte[] arrSizeHeader = new byte[SIZE_HEADER_LENGTH];
+        ByteBuffer byteBuffer = ByteBuffer.allocate(SIZE_HEADER_LENGTH);
+        int lengthHeader;
+        if (in.read(arrSizeHeader) == -1) {
+            throw new IOException("опачки, что-то не читается файл");
+        }
+        byteBuffer.put(arrSizeHeader);
+        lengthHeader = byteBuffer.getInt(0);
+
+        int readedBytes = 0;
+        byte[] arrHeader = new byte[lengthHeader];
+        int offset = 0;
+        int length = 0;
+        while ((readedBytes = in.read(arrHeader, offset, length)) != lengthHeader) {
+            offset += readedBytes;
+            length -= readedBytes;
+            if (readedBytes == -1) {
+                throw new IOException("опачки, что-то не читается файл");
             }
-            off += total;
-            maxLen -= total;
         }
-        if (readingByte == -1) {
-            throw new IOException("socker closed, when trying to read the head");
+        String stringInfoFileClient = new String(arrHeader, StandardCharsets.UTF_8);
+        String[] arrInfoFileClient = stringInfoFileClient.split("#", -1);
+        if (arrInfoFileClient.length != 3) {
+            throw new IOException("мда... треш");
         }
-        fileName = new String(Arrays.copyOfRange(arrByteFile, 0, SIZE_FILE_NAME), StandardCharsets.UTF_8);
-        expectedFileSize = Integer.valueOf(new String(Arrays.copyOfRange(arrByteFile, SIZE_FILE_NAME,
-                SIZE_FILE_NAME + SIZE_FILE_SIZE)));
+        fileName = arrInfoFileClient[0];
+        expectedFileSize = Integer.valueOf(arrInfoFileClient[1]);
     }
 
     public static int readFile(BufferedInputStream in) throws IOException {
@@ -77,12 +86,13 @@ public class Server {
 
         byte[] arrByteFile = new byte[SIZE_BUFFER];
         int readingByte;
+        int total = 0;
         while ((readingByte = in.read(arrByteFile)) != -1) {
             clientFile.write(arrByteFile); //так, запись идет с начала (то есть есть ли затирание?)
-            readingByte ++;                //запись массива идет с мусором? (ну не все же 8 кб будут заполнены)
+            total += readingByte;                //запись массива идет с мусором? (ну не все же 8 кб будут заполнены)
         }
         clientFile.close();
-        return readingByte;
+        return total;
     }
 
     public static void createDirectory() throws Exception{
