@@ -3,22 +3,29 @@ package client;
 
 import java.io.*;
 import java.net.InetAddress;
+import java.net.InetSocketAddress;
 import java.net.Socket;
+import java.net.UnknownHostException;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
 
 import static java.lang.System.exit;
+import static java.lang.foreign.MemorySegment.NULL;
 
 public class Client {
-    public static final int SIZE_FILE_NAME = 4096;
+    public static final int MAX_SIZE_FILE_NAME = 4096;
     public static final int SIZE_HEADER_LENGTH = 2;
     public static final int SIZE_FILE_SIZE = 6;
     public static final int SIZE_BUFFER = 8192;//определить лучший размер позже
     public static final double MAX_SIZE_FILE = Math.pow(2, 40);
     public static File file;
 
-
     public static String fileName;
+    public static InetAddress serverInetAddress;
+    public static int serverPort;
+
     public static Integer expectedFileSize;
 
     public static BufferedInputStream in;
@@ -26,25 +33,10 @@ public class Client {
 
 
     public static void main(String[] args) throws IOException {
-        if (args.length != 3) {
-            System.out.println("где параметры (путь к файлу, ip и номер порта сервера)?");
-            exit(1);
-        }
-        fileName = new String(args[0].getBytes(), StandardCharsets.UTF_8);
-        if (fileName.getBytes().length > 2096) {
-            System.out.println("другой файл давай, у этого длина слишком большая!!!");
-            exit(0);
-        }
-        file = new File(fileName);
-        if (!file.exists() || (file.length() > MAX_SIZE_FILE)) {
-            System.out.println("такого файла нет или что-то ты переборщил с размером. попробуй, дружочек, еще раз))");
-            exit(1);
-        }
-        String ipAddressServer = args[1];
-        int portServer = Integer.parseInt(args[0]);
+        CheckArgs(args);
 
-        try (Socket socket = new Socket(InetAddress.getByName(ipAddressServer), portServer)){
-            //непонятно, что лучше DataInputStream или BufferedInputStream
+        try (Socket socket = new Socket()){
+            socket.connect(new InetSocketAddress(serverInetAddress, serverPort), 0);
 
             sendFile(socket);
 
@@ -54,6 +46,46 @@ public class Client {
             System.out.println(e.getMessage());
         } finally {
             shutdown();
+        }
+
+    }
+
+    public static void CheckArgs(String[] args) {
+        if (args.length != 3) {
+            System.err.println("File name, ip and port are not specified");
+            exit(1);
+        }
+
+        Path path = Path.of(args[0]);
+        try {
+            serverInetAddress =  InetAddress.getByAddress(args[1].getBytes());
+            serverPort = Integer.parseInt(args[2]);
+        } catch (NumberFormatException e) {
+            System.err.println("Invalid port: " + args[2] + "\n" + e.getMessage());
+        } catch (UnknownHostException e) {
+            System.err.println("Invalid ip:" + args[1] + "\n" + e.getMessage());
+        }
+
+        if (!Files.exists(path) || !Files.isRegularFile(path)) {
+            System.err.println("File does not exist or is not regular");
+            exit(1);
+        }
+        try {
+            long fileSize = Files.size(path);
+            if (fileSize > MAX_SIZE_FILE) {
+                System.err.println("File is large (no more then 1 Tb is allowed):" + fileSize);
+                exit(1);
+            }
+            fileName = path.getFileName().toString();
+            byte[] fileNameByte = fileName.getBytes(StandardCharsets.UTF_8);
+            int fileNameByteLength = fileNameByte.length;
+            if (fileNameByteLength > MAX_SIZE_FILE_NAME) {
+                System.err.println("File name (UTF-8 format) is too long: " + fileNameByteLength);
+                exit(1);
+            }
+
+        } catch (IOException e) {
+            System.err.println(e.getMessage());
         }
 
     }
