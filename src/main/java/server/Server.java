@@ -4,119 +4,157 @@ package server;
 import java.io.*;
 import java.net.ServerSocket;
 import java.net.Socket;
-import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
-import java.util.Arrays;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.text.MessageFormat;
+import java.time.Duration;
+import java.time.Instant;
+import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicLong;
 
 import static java.lang.System.exit;
+import static java.nio.file.StandardOpenOption.CREATE_NEW;
 
 public class Server {
     public static final int SIZE_BUFFER = 8192; //определить лучший размер позже
-    public static final int SIZE_HEADER_LENGTH= 2;
+
+    public static Path UPLOADS_DIR = Path.of("uploads");
+    public static int listeningPort;
+    public static ExecutorService clientThreadPool = Executors.newCachedThreadPool();
 
 
-    public static String fileName;
-    public static Integer expectedFileSize;
-    public static File clientsDirectory;
-
-    public static Socket clientSocket;
-    public static BufferedInputStream in;
-    public static BufferedOutputStream out;
-
-
-    public static void main(String[] args) throws IOException {
+    public static void main(String[] args) {
         if (args.length != 1) {
-            System.out.println("где параметр (порт сервера, на котором он будет слушать)?");
+            System.out.println("Port is not specified");
             exit(1);
         }
-        int portListen = Integer.parseInt(args[0]);
-
-        try (ServerSocket serverSocket = new ServerSocket(portListen)){
-            clientSocket = serverSocket.accept();
-            createDirectory();
-
-            //непонятно, что лучше DataInputStream или BufferedInputStream
-            in = new BufferedInputStream(clientSocket.getInputStream()); //от клиента к серверу (чтение)
-            out = new BufferedOutputStream(clientSocket.getOutputStream());
-            getInfoFileClient(in); //rename later
-            int readingByte = readFile(in);
-            responseClient(readingByte, out);
-
-        } catch (Exception e) {
-            System.out.println(e.getMessage());
-        } finally {
-           shutdown();
-        }
+        listeningPort = Integer.parseInt(args[0]);
+        start();
 
     }
 
-    public static void getInfoFileClient(BufferedInputStream in) throws IOException {
-        byte[] arrSizeHeader = new byte[SIZE_HEADER_LENGTH];
-        ByteBuffer byteBuffer = ByteBuffer.allocate(SIZE_HEADER_LENGTH);
-        int lengthHeader;
-        if (in.read(arrSizeHeader) == -1) {
-            throw new IOException("опачки, что-то не читается файл");
-        }
-        byteBuffer.put(arrSizeHeader);
-        lengthHeader = byteBuffer.getInt(0);
+    public static void start() {
+        try (ServerSocket serverSocket = new ServerSocket(listeningPort)){
+            if (!Files.exists(UPLOADS_DIR)) {Files.createDirectory(UPLOADS_DIR);}
+            while (!serverSocket.isClosed()) {
+                Socket clientSocket = serverSocket.accept();
+                clientThreadPool.submit(new Connection(clientSocket));
+            }
 
-        int readedBytes = 0;
-        byte[] arrHeader = new byte[lengthHeader];
-        int offset = 0;
-        int length = 0;
-        while ((readedBytes = in.read(arrHeader, offset, length)) != lengthHeader) {
-            offset += readedBytes;
-            length -= readedBytes;
-            if (readedBytes == -1) {
-                throw new IOException("опачки, что-то не читается файл");
+        } catch (IOException e) {
+            System.err.println(e.getMessage());
+        }
+    }
+
+    private static class Connection implements Runnable{
+        private final Socket socket;
+        private Instant startTime;
+        private String clientSocketString;
+        private long fileSize;
+
+        private final AtomicLong totalReadBytes = new AtomicLong(0);
+        private final AtomicLong penultReadBytes = new AtomicLong(0);
+        private final double SECONDS = 3.0;
+
+        Connection(Socket socket) {
+            this.socket = socket;
+        }
+
+
+        public void run() {
+            clientSocketString = socket.getLocalSocketAddress().toString();
+            ScheduledExecutorService executorService = Executors.newScheduledThreadPool(1);
+            startTime = Instant.now();
+
+            Runnable Task = () -> {
+                long lastTotal = totalReadBytes.get();
+                long total = penultReadBytes.getAndSet(lastTotal);
+                double instantSpeed = (lastTotal - total) / SECONDS;
+                double avgSpeed = lastTotal / (Duration.between(startTime, Instant.now()).toMillis() / 1000.0);
+                System.out.printf("%s: instant speed: %.3f byte/s, average speed: %.3f byte/s \n",
+                        clientSocketString, instantSpeed, avgSpeed);
+            };
+            executorService.scheduleAtFixedRate(Task, 3, 3, TimeUnit.SECONDS);
+
+            readFile();
+            executorService.shutdownNow();
+            sendResponse();
+        }
+
+        public void sendResponse() {
+            try {
+                PrintWriter out = new PrintWriter(socket.getOutputStream(), true);
+                long receivedBytes = totalReadBytes.get();
+                if (receivedBytes == fileSize) {
+                    out.println("Server: OK!!! I received " + receivedBytes + "bytes");
+                } else {
+                    out.println("Server: ERROR!!! I received " + receivedBytes + "bytes and file size is" + fileSize);
+                }
+                out.flush();
+            } catch (IOException e) {
+                System.out.println(e.getMessage());
             }
         }
-        String stringInfoFileClient = new String(arrHeader, StandardCharsets.UTF_8);
-        String[] arrInfoFileClient = stringInfoFileClient.split("#", -1);
-        if (arrInfoFileClient.length != 3) {
-            throw new IOException("мда... треш");
-        }
-        fileName = arrInfoFileClient[0];
-        expectedFileSize = Integer.valueOf(arrInfoFileClient[1]);
-    }
 
-    public static int readFile(BufferedInputStream in) throws IOException {
-        File file = new File("uploads", fileName); //здесь нужна проверка на единственность существования файла
-        BufferedOutputStream clientFile = new BufferedOutputStream(new FileOutputStream(file, true));
+        //что с названиями переменных...
+        public Path createUniqueFileName(String pathString) throws IOException{
+            Path path = UPLOADS_DIR.resolve(pathString);
+            if (!Files.exists(path)) {
+                return path;
+            }
 
-        byte[] arrByteFile = new byte[SIZE_BUFFER];
-        int readingByte;
-        int total = 0;
-        while ((readingByte = in.read(arrByteFile)) != -1) {
-            clientFile.write(arrByteFile); //так, запись идет с начала (то есть есть ли затирание?)
-            total += readingByte;                //запись массива идет с мусором? (ну не все же 8 кб будут заполнены)
+            String format = "";
+            for (int i = 0; i < Integer.MAX_VALUE; i++) {
+                int dotIndex = pathString.lastIndexOf(".");
+                if (dotIndex > 0) {
+                     format = pathString.substring(dotIndex);
+                     pathString = pathString.substring(0, dotIndex);
+                }
+                path = UPLOADS_DIR.resolve(pathString + "_" + i + "." + format);
+                if (!Files.exists(path)) {
+                    return path;
+                }
+            }
+            throw new IOException("File don't create");
         }
-        clientFile.close();
-        return total;
-    }
 
-    public static void createDirectory() throws Exception{
-        clientsDirectory = new File("uploads");
-        if (!clientsDirectory.mkdir()) {
-            throw new Exception("directory don't created");
-        }
-    }
+        public void readFile () {
+            try (DataInputStream in = new DataInputStream(new BufferedInputStream(socket.getInputStream()))) {
+                short sizeFileName = in.readShort();
+                byte[] fileNameByte = new byte[sizeFileName];
+                in.readFully(fileNameByte);
+                fileSize = in.readLong();
 
-    public static void responseClient(int readingByte, BufferedOutputStream out) throws IOException {
-        String message;
-        if (readingByte == expectedFileSize) {
-            message = "OK: все прочитано\n";
-        } else {
-            message = "OH, SILLY: где-то байтики не дошли...\n";
-        }
-        out.write(message.getBytes());
-    }
+                String fileName = new String(fileNameByte, StandardCharsets.UTF_8);
+                Path path = createUniqueFileName(fileName);
 
-    public static void shutdown() throws IOException {
-        if (!clientSocket.isClosed()) {
-            clientSocket.close();
+                OutputStream fileOut = new BufferedOutputStream(Files.newOutputStream(path, CREATE_NEW), SIZE_BUFFER);
+                byte[] buffer = new byte[SIZE_BUFFER];
+                long remainder = fileSize;
+                int readBytes;
+                while (remainder > 0) {
+                    if (remainder < SIZE_BUFFER) {
+                        readBytes = in.read(buffer, 0, (int)remainder);
+                    } else {
+                        readBytes = in.read(buffer, 0, SIZE_BUFFER);
+                    }
+                    if (readBytes == -1) {break;}
+                    fileOut.write(buffer, 0, readBytes);
+                    totalReadBytes.addAndGet(readBytes);
+                    remainder -= readBytes;
+                }
+            } catch (IOException e) {
+                System.err.println(e.getMessage());
+            } finally { //после разобраться
+                long lastTotal = totalReadBytes.get();
+                long total = penultReadBytes.getAndSet(lastTotal);
+                double instantSpeed = (lastTotal - total) / SECONDS;
+                double avgSpeed = lastTotal / (Duration.between(startTime, Instant.now()).toMillis() / 1000.0);
+                System.out.printf("%s: instant speed: %.3f byte/s, average speed: %.3f byte/s \n",
+                        clientSocketString, instantSpeed, avgSpeed);
+            }
         }
-        in.close(); //а что если еще не успели выделить ресурсы на это?
-        out.close();
+
     }
 }

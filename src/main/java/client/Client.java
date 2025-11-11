@@ -13,10 +13,10 @@ import static java.lang.System.exit;
 public class Client {
     public static final int MAX_SIZE_FILE_NAME = 4096;
     public static final int SIZE_BUFFER = 8192;//определить лучший размер позже
-    public static final double MAX_SIZE_FILE = Math.pow(2, 40);
+    public static final long MAX_SIZE_FILE = 1024L * 1024 * 1024 * 1024;
 
     public static String fileName;
-    public static int fileNameByteLength;
+    public static byte[] fileNameByte;
     public static long fileSize;
     public static InetAddress serverInetAddress;
     public static int serverPort;
@@ -25,11 +25,11 @@ public class Client {
     public static void main(String[] args) {
         CheckArgs(args);
         try (Socket socket = new Socket()){
-            socket.connect(new InetSocketAddress(serverInetAddress, serverPort), 0);
+            socket.connect(new InetSocketAddress(serverInetAddress, serverPort), 10000);
             sendFile(socket);
             getResponse(socket);
         } catch (Exception e) {
-            System.out.println(e.getMessage());
+            System.err.println(e.getMessage());
         }
 
     }
@@ -42,7 +42,7 @@ public class Client {
 
         try {
             pathToFile = Path.of(args[0]);
-            serverInetAddress =  InetAddress.getByAddress(args[1].getBytes());
+            serverInetAddress =  InetAddress.getByName(args[1]);
             serverPort = Integer.parseInt(args[2]);
 
             if (!Files.exists(pathToFile) || !Files.isRegularFile(pathToFile)) {
@@ -56,9 +56,8 @@ public class Client {
             }
             fileName = pathToFile.getFileName().toString();
             byte[] fileNameByte = fileName.getBytes(StandardCharsets.UTF_8);
-            fileNameByteLength = fileNameByte.length;
-            if (fileNameByteLength > MAX_SIZE_FILE_NAME) {
-                System.err.println("File name (UTF-8 format) is too long: " + fileNameByteLength);
+            if (fileNameByte.length > MAX_SIZE_FILE_NAME) {
+                System.err.println("File name (UTF-8 format) is too long: " + fileNameByte.length);
                 exit(1);
             }
 
@@ -72,8 +71,8 @@ public class Client {
 
     public static void sendFile(Socket socket) throws IOException{
         DataOutputStream out =  new DataOutputStream(new BufferedOutputStream(socket.getOutputStream()));
-        out.writeShort(fileNameByteLength);
-        out.writeUTF(fileName);
+        out.writeShort(fileNameByte.length);
+        out.write(fileNameByte);
         out.writeLong(fileSize);
 
         byte[] arrByteBuffer = new byte[SIZE_BUFFER];
@@ -89,7 +88,7 @@ public class Client {
     public static void getResponse(Socket socket) throws IOException {
         BufferedReader bufferedReader = new BufferedReader(new InputStreamReader(socket.getInputStream()));
         String message = bufferedReader.readLine();
-        System.out.println("Server: " + message);
+        System.err.println("Server: " + message);
     }
 
 }
