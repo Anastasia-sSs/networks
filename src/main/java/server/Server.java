@@ -7,7 +7,6 @@ import java.net.Socket;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.text.MessageFormat;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.concurrent.*;
@@ -63,7 +62,7 @@ public class Server {
 
 
         public void run() {
-            clientSocketString = socket.getLocalSocketAddress().toString();
+            clientSocketString = socket.getRemoteSocketAddress().toString();
             ScheduledExecutorService executorService = Executors.newScheduledThreadPool(1);
             startTime = Instant.now();
 
@@ -77,7 +76,11 @@ public class Server {
             };
             executorService.scheduleAtFixedRate(Task, 3, 3, TimeUnit.SECONDS);
 
-            readFile();
+            try {
+                readFile();
+            } catch (IOException e) {
+                System.out.println(e.getMessage());
+            }
             executorService.shutdownNow();
             sendResponse();
         }
@@ -105,13 +108,13 @@ public class Server {
             }
 
             String format = "";
+            int dotIndex = pathString.lastIndexOf(".");
+            if (dotIndex > 0) {
+                format = pathString.substring(dotIndex);
+                pathString = pathString.substring(0, dotIndex);
+            }
             for (int i = 0; i < Integer.MAX_VALUE; i++) {
-                int dotIndex = pathString.lastIndexOf(".");
-                if (dotIndex > 0) {
-                     format = pathString.substring(dotIndex);
-                     pathString = pathString.substring(0, dotIndex);
-                }
-                path = UPLOADS_DIR.resolve(pathString + "_" + i + "." + format);
+                path = UPLOADS_DIR.resolve(pathString + "_" + i + format);
                 if (!Files.exists(path)) {
                     return path;
                 }
@@ -119,7 +122,8 @@ public class Server {
             throw new IOException("File don't create");
         }
 
-        public void readFile () {
+        public void readFile () throws IOException {
+            BufferedOutputStream fileOut = null;
             try (DataInputStream in = new DataInputStream(new BufferedInputStream(socket.getInputStream()))) {
                 short sizeFileName = in.readShort();
                 byte[] fileNameByte = new byte[sizeFileName];
@@ -129,7 +133,7 @@ public class Server {
                 String fileName = new String(fileNameByte, StandardCharsets.UTF_8);
                 Path path = createUniqueFileName(fileName);
 
-                OutputStream fileOut = new BufferedOutputStream(Files.newOutputStream(path, CREATE_NEW), SIZE_BUFFER);
+                fileOut = new BufferedOutputStream(Files.newOutputStream(path, CREATE_NEW), SIZE_BUFFER);
                 byte[] buffer = new byte[SIZE_BUFFER];
                 long remainder = fileSize;
                 int readBytes;
@@ -144,15 +148,21 @@ public class Server {
                     totalReadBytes.addAndGet(readBytes);
                     remainder -= readBytes;
                 }
+                fileOut.flush();
+                fileOut.close();
+                fileOut = null;
             } catch (IOException e) {
                 System.err.println(e.getMessage());
-            } finally { //после разобраться
+            } finally { //после разобраться с копипастом
                 long lastTotal = totalReadBytes.get();
                 long total = penultReadBytes.getAndSet(lastTotal);
                 double instantSpeed = (lastTotal - total) / SECONDS;
                 double avgSpeed = lastTotal / (Duration.between(startTime, Instant.now()).toMillis() / 1000.0);
                 System.out.printf("%s: instant speed: %.3f byte/s, average speed: %.3f byte/s \n",
                         clientSocketString, instantSpeed, avgSpeed);
+                if (fileOut != null) {
+                    fileOut.close();
+                }
             }
         }
 

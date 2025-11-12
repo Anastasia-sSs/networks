@@ -31,7 +31,6 @@ public class Client {
         } catch (Exception e) {
             System.err.println(e.getMessage());
         }
-
     }
 
     public static void CheckArgs(String[] args) {
@@ -55,7 +54,7 @@ public class Client {
                 exit(1);
             }
             fileName = pathToFile.getFileName().toString();
-            byte[] fileNameByte = fileName.getBytes(StandardCharsets.UTF_8);
+            fileNameByte = fileName.getBytes(StandardCharsets.UTF_8);
             if (fileNameByte.length > MAX_SIZE_FILE_NAME) {
                 System.err.println("File name (UTF-8 format) is too long: " + fileNameByte.length);
                 exit(1);
@@ -82,7 +81,6 @@ public class Client {
             out.write(arrByteBuffer, 0, readedBytes);
         }
         out.flush();
-        clientFile.close();
     }
 
     public static void getResponse(Socket socket) throws IOException {
