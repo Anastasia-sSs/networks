@@ -9,18 +9,23 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.Map;
 import java.util.concurrent.*;
-import java.util.concurrent.atomic.AtomicLong;
 
 import static java.lang.System.exit;
 import static java.nio.file.StandardOpenOption.CREATE_NEW;
 
 public class Server {
-    public static final int SIZE_BUFFER = 8192; //определить лучший размер позже
+    public static final int SIZE_BUFFER = 8192;
+    public static final int MAX_FILENAME_BYTES = 4096;
+    public static final long MAX_FILE_SIZE = 1024L * 1024 * 1024 * 1024;
 
     public static Path UPLOADS_DIR = Path.of("uploads");
     public static int listeningPort;
     public static ExecutorService clientThreadPool = Executors.newCachedThreadPool();
+
+    private static final ScheduledExecutorService statScheduler = Executors.newSingleThreadScheduledExecutor();
+    private static final ConcurrentMap<String, StatClient> statMap = new ConcurrentHashMap<>();
 
 
     public static void main(String[] args) {
@@ -34,8 +39,22 @@ public class Server {
     }
 
     public static void start() {
-        try (ServerSocket serverSocket = new ServerSocket(listeningPort)){
+        try (ServerSocket serverSocket = new ServerSocket(listeningPort)) {
             if (!Files.exists(UPLOADS_DIR)) {Files.createDirectory(UPLOADS_DIR);}
+
+            statScheduler.scheduleAtFixedRate(() -> {
+                for (Map.Entry<String, StatClient> entry : statMap.entrySet()) {
+                    StatClient stat = entry.getValue();
+                    long total = stat.totalBytes;
+                    long prev = stat.lastReportedBytes;
+                    stat.lastReportedBytes = total;
+                    double instantSpeed = (total - prev) / 3.0;
+                    double avgSpeed = total / Math.max(0.001, (Duration.between(stat.startTime, Instant.now()).toMillis() / 1000.0));
+                    System.out.printf("%s: Instant Speed: %.3f B/s, Average Speed: %.3f B/s \n",
+                            stat.clientId, instantSpeed, avgSpeed);
+                }
+            }, 3, 3, TimeUnit.SECONDS);
+
             while (!serverSocket.isClosed()) {
                 Socket clientSocket = serverSocket.accept();
                 clientThreadPool.submit(new Connection(clientSocket));
@@ -43,128 +62,158 @@ public class Server {
 
         } catch (IOException e) {
             System.err.println(e.getMessage());
+        } finally {
+            clientThreadPool.shutdownNow();
+            statScheduler.shutdownNow();
+        }
+
+    }
+
+    private static class StatClient {
+        String clientId;
+        Instant startTime;
+        volatile long totalBytes = 0;
+        volatile long lastReportedBytes = 0;
+
+        StatClient(String clientId) {
+            this.clientId = clientId;
+            this.startTime = Instant.now();
         }
     }
 
+
     private static class Connection implements Runnable{
         private final Socket socket;
-        private Instant startTime;
-        private String clientSocketString;
+        private String clientId;
+        private StatClient stat;
+        private String fileName;
         private long fileSize;
-
-        private final AtomicLong totalReadBytes = new AtomicLong(0);
-        private final AtomicLong penultReadBytes = new AtomicLong(0);
-        private final double SECONDS = 3.0;
+        private Path filePath;
+        private boolean allBytesReadFlag = false;
 
         Connection(Socket socket) {
             this.socket = socket;
         }
 
-
         public void run() {
-            clientSocketString = socket.getRemoteSocketAddress().toString();
-            ScheduledExecutorService executorService = Executors.newScheduledThreadPool(1);
-            startTime = Instant.now();
-
-            Runnable Task = () -> {
-                long lastTotal = totalReadBytes.get();
-                long total = penultReadBytes.getAndSet(lastTotal);
-                double instantSpeed = (lastTotal - total) / SECONDS;
-                double avgSpeed = lastTotal / (Duration.between(startTime, Instant.now()).toMillis() / 1000.0);
-                System.out.printf("%s: instant speed: %.3f byte/s, average speed: %.3f byte/s \n",
-                        clientSocketString, instantSpeed, avgSpeed);
-            };
-            executorService.scheduleAtFixedRate(Task, 3, 3, TimeUnit.SECONDS);
-
+            clientId = socket.getRemoteSocketAddress().toString();
+            stat = new StatClient(clientId);
+            statMap.put(clientId, stat);
             try {
-                readFile();
+                handleClient();
+                socket.close();
             } catch (IOException e) {
                 System.out.println(e.getMessage());
+            } finally {
+                report();
+                cleanup();
+                statMap.remove(clientId);
             }
-            executorService.shutdownNow();
-            sendResponse();
         }
 
-        public void sendResponse() {
-            try {
-                PrintWriter out = new PrintWriter(socket.getOutputStream(), true);
-                long receivedBytes = totalReadBytes.get();
-                if (receivedBytes == fileSize) {
-                    out.println("Server: OK!!! I received " + receivedBytes + "bytes");
+        public void handleClient() throws IOException {
+            try (DataInputStream in = new DataInputStream((new BufferedInputStream(socket.getInputStream())))){
+                readHeader(in);
+                filePath = createUniqueFileName();
+
+                receiveFile(in);
+                allBytesReadFlag = (stat.totalBytes == fileSize);
+                sendResponse();
+            } catch (IOException e) {
+                sendResponse();
+            }
+        }
+
+        public void sendResponse() throws IOException{
+            try (PrintWriter out = new PrintWriter(new OutputStreamWriter(socket.getOutputStream(), StandardCharsets.UTF_8), true)) {
+                if (allBytesReadFlag) {
+                    out.println("Server: OK!!! I received " + stat.totalBytes + "bytes");
                 } else {
-                    out.println("Server: ERROR!!! I received " + receivedBytes + "bytes and file size is" + fileSize);
+                    out.println("Server: ERROR!!! I received " + stat.totalBytes + "bytes and file size is" + fileSize);
                 }
                 out.flush();
-            } catch (IOException e) {
-                System.out.println(e.getMessage());
             }
         }
 
-        //что с названиями переменных...
-        public Path createUniqueFileName(String pathString) throws IOException{
-            Path path = UPLOADS_DIR.resolve(pathString);
+        private void readHeader(DataInputStream in) throws IOException {
+            int nameLength = in.readUnsignedShort();
+            if (nameLength == 0 || nameLength > MAX_FILENAME_BYTES) {
+                throw new IOException("Invalid filename length: " + nameLength);
+            }
+            byte[] nameBytes = new byte[nameLength];
+            in.readFully(nameBytes);
+            fileName = new String(nameBytes, StandardCharsets.UTF_8);
+
+            fileSize = in.readLong();
+            if (fileSize < 0 || fileSize > MAX_FILE_SIZE) {
+                throw new IOException("Invalid file size: " + fileSize);
+            }
+
+        }
+
+        private Path createUniqueFileName() throws IOException {
+            String nameFile = Path.of(fileName).getFileName().toString();
+            Path path = UPLOADS_DIR.resolve(nameFile);
             if (!Files.exists(path)) {
                 return path;
             }
 
+            String base = nameFile;
             String format = "";
-            int dotIndex = pathString.lastIndexOf(".");
-            if (dotIndex > 0) {
-                format = pathString.substring(dotIndex);
-                pathString = pathString.substring(0, dotIndex);
+            int dot = nameFile.lastIndexOf('.');
+            if (dot > 0) {
+                base = nameFile.substring(0, dot);
+                format = nameFile.substring(dot);
             }
-            for (int i = 0; i < Integer.MAX_VALUE; i++) {
-                path = UPLOADS_DIR.resolve(pathString + "_" + i + format);
+            for (int i = 1; i < Integer.MAX_VALUE; i++) {
+                path = UPLOADS_DIR.resolve(base + "_" + i + format);
                 if (!Files.exists(path)) {
                     return path;
                 }
             }
-            throw new IOException("File don't create");
+            throw new IOException("Can not generate unique filename for " + nameFile);
         }
 
-        public void readFile () throws IOException {
-            BufferedOutputStream fileOut = null;
-            try (DataInputStream in = new DataInputStream(new BufferedInputStream(socket.getInputStream()))) {
-                short sizeFileName = in.readShort();
-                byte[] fileNameByte = new byte[sizeFileName];
-                in.readFully(fileNameByte);
-                fileSize = in.readLong();
-
-                String fileName = new String(fileNameByte, StandardCharsets.UTF_8);
-                Path path = createUniqueFileName(fileName);
-
-                fileOut = new BufferedOutputStream(Files.newOutputStream(path, CREATE_NEW), SIZE_BUFFER);
+        private void receiveFile(DataInputStream in) throws IOException {
+            try (OutputStream fileOut = new BufferedOutputStream(Files.newOutputStream(filePath, CREATE_NEW), SIZE_BUFFER)) {
                 byte[] buffer = new byte[SIZE_BUFFER];
                 long remainder = fileSize;
                 int readBytes;
                 while (remainder > 0) {
                     if (remainder < SIZE_BUFFER) {
-                        readBytes = in.read(buffer, 0, (int)remainder);
+                        readBytes = in.read(buffer, 0, (int) remainder);
                     } else {
                         readBytes = in.read(buffer, 0, SIZE_BUFFER);
                     }
-                    if (readBytes == -1) {break;}
+                    if (readBytes == -1) { break; }
                     fileOut.write(buffer, 0, readBytes);
-                    totalReadBytes.addAndGet(readBytes);
+                    stat.totalBytes += readBytes;
                     remainder -= readBytes;
                 }
                 fileOut.flush();
-                fileOut.close();
-                fileOut = null;
-            } catch (IOException e) {
-                System.err.println(e.getMessage());
-            } finally { //после разобраться с копипастом
-                long lastTotal = totalReadBytes.get();
-                long total = penultReadBytes.getAndSet(lastTotal);
-                double instantSpeed = (lastTotal - total) / SECONDS;
-                double avgSpeed = lastTotal / (Duration.between(startTime, Instant.now()).toMillis() / 1000.0);
-                System.out.printf("%s: instant speed: %.3f byte/s, average speed: %.3f byte/s \n",
-                        clientSocketString, instantSpeed, avgSpeed);
-                if (fileOut != null) {
-                    fileOut.close();
-                }
             }
         }
 
+        private void report() {
+            long total = stat.totalBytes;
+            long prev = stat.lastReportedBytes;
+            stat.lastReportedBytes = total;
+            double instantSpeed = (total - prev) / 3.0;
+            double avgSpeed = total / Math.max(0.001, (Duration.between(stat.startTime, Instant.now()).toMillis() / 1000.0));
+            System.out.printf("%s: Instant Speed: %.3f B/s, Average Speed: %.3f B/s",
+                    stat.clientId, instantSpeed, avgSpeed);
+        }
+
+        private void cleanup() {
+            try {
+                if (!allBytesReadFlag && filePath != null) {
+                    Files.deleteIfExists(filePath);
+                    System.out.println(clientId + ": Partial file deleted: " + filePath);
+                }
+            } catch(IOException e){
+                System.err.println(clientId + ": Failed to delete partial file " + filePath);
+                System.err.println(e.getMessage());
+            }
+        }
     }
 }

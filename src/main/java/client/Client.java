@@ -1,6 +1,5 @@
 package client;
 
-
 import java.io.*;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
@@ -12,7 +11,7 @@ import static java.lang.System.exit;
 
 public class Client {
     public static final int MAX_SIZE_FILE_NAME = 4096;
-    public static final int SIZE_BUFFER = 8192;//определить лучший размер позже
+    public static final int SIZE_BUFFER = 8192;
     public static final long MAX_SIZE_FILE = 1024L * 1024 * 1024 * 1024;
 
     public static String fileName;
@@ -45,7 +44,7 @@ public class Client {
             serverPort = Integer.parseInt(args[2]);
 
             if (!Files.exists(pathToFile) || !Files.isRegularFile(pathToFile)) {
-                System.err.println("File does not exist or is not regular");
+                System.err.println("File does not exist or is not regular" + pathToFile);
                 exit(1);
             }
             fileSize = Files.size(pathToFile);
@@ -62,8 +61,10 @@ public class Client {
 
         } catch (IOException e) {
             System.err.println(e.getMessage());
+            exit(1);
         } catch (NumberFormatException e) {
-            System.err.println("Invalid port: " + args[2] + "\n" + e.getMessage());
+            System.err.println("Invalid port: " + args[2] + "(" + e.getMessage() + ")");
+            exit(1);
         }
 
     }
@@ -73,20 +74,24 @@ public class Client {
         out.writeShort(fileNameByte.length);
         out.write(fileNameByte);
         out.writeLong(fileSize);
+        out.flush();
 
         byte[] arrByteBuffer = new byte[SIZE_BUFFER];
-        BufferedInputStream clientFile = new BufferedInputStream(Files.newInputStream(pathToFile), SIZE_BUFFER);
-        int readedBytes;
-        while ((readedBytes = clientFile.read(arrByteBuffer, 0, SIZE_BUFFER)) != -1) {
-            out.write(arrByteBuffer, 0, readedBytes);
+        try (BufferedInputStream clientFile = new BufferedInputStream(Files.newInputStream(pathToFile), SIZE_BUFFER)) {
+            int readedBytes;
+            while ((readedBytes = clientFile.read(arrByteBuffer, 0, SIZE_BUFFER)) != -1) {
+                out.write(arrByteBuffer, 0, readedBytes);
+            }
+            out.flush();
         }
-        out.flush();
+        socket.shutdownOutput();
     }
 
     public static void getResponse(Socket socket) throws IOException {
-        BufferedReader bufferedReader = new BufferedReader(new InputStreamReader(socket.getInputStream()));
-        String message = bufferedReader.readLine();
-        System.err.println("Server: " + message);
+        try (BufferedReader bufferedReader = new BufferedReader(new InputStreamReader(socket.getInputStream(), StandardCharsets.UTF_8))) {
+            String message = bufferedReader.readLine();
+            System.err.println("Server: " + message);
+        }
     }
 
 }
