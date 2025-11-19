@@ -200,7 +200,7 @@ public class Server {
             stat.lastReportedBytes = total;
             double instantSpeed = (total - prev) / 3.0;
             double avgSpeed = total / Math.max(0.001, (Duration.between(stat.startTime, Instant.now()).toMillis() / 1000.0));
-            System.out.printf("%s: Instant Speed: %.3f B/s, Average Speed: %.3f B/s",
+            System.out.printf("%s: Instant Speed: %.3f B/s, Average Speed: %.3f B/s \n",
                     stat.clientId, instantSpeed, avgSpeed);
         }
 
